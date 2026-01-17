@@ -7,44 +7,49 @@ import os
 import math
 import tempfile
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# --- PAGE CONFIGURATION ---
+# --- CONFIGURATION ---
 st.set_page_config(
-    page_title="Collage App", 
-    page_icon="🖼️", 
-    layout="centered"
+    page_title="Easy Collage", 
+    page_icon="✨", 
+    layout="wide"
 )
 
-# --- MOBILE-FRIENDLY CSS ---
+# --- STYLING ---
 st.markdown("""
 <style>
-    /* Make text responsive */
-    h1 { font-size: 1.8rem; text-align: center; color: #2E86C1; }
-    
-    /* Make buttons large and easy to tap on mobile */
-    div.stButton > button {
-        width: 100%;
-        height: 3.5em;
-        font-size: 1.1rem;
-        font-weight: bold;
-        border-radius: 10px;
-        margin-top: 10px;
-        margin-bottom: 10px;
-    }
-    
-    /* Color specific buttons */
-    .generate-word { background-color: #2E86C1; color: white; border: none; }
-    .generate-png { background-color: #E67E22; color: white; border: none; }
-    .camera-btn { background-color: #28B463; color: white; border: none; }
-    
-    /* Center the file uploader */
-    [data-testid="stFileUpload"] {
+    /* Custom Title */
+    .title {
         text-align: center;
+        color: #4A90E2;
+        font-weight: 800;
+        padding: 10px;
     }
     
-    /* Reduce padding on mobile */
-    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    /* Make the preview container scrollable on mobile */
+    .preview-container {
+        height: 400px;
+        overflow-y: auto;
+        border: 2px dashed #ccc;
+        border-radius: 10px;
+        padding: 10px;
+        background-color: #f9f9f9;
+        text-align: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    /* Large Buttons for Mobile */
+    .stButton>button {
+        width: 100%;
+        height: 3em;
+        border-radius: 8px;
+        font-weight: bold;
+        font-size: 1.1rem;
+        margin-top: 5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,22 +85,66 @@ def set_cell_border(cell):
         tcBorders.append(element)
     tcPr.append(tcBorders)
 
-# --- GENERATORS ---
+def create_preview(images, title):
+    """Creates a low-res PNG for the user to check before downloading."""
+    if not images: return None
+    
+    W, H = 800, 1131 # Low res for speed
+    t_h = 100 if title else 0
+    avail_h = H - t_h
+    canvas = Image.new('RGB', (W, H), 'white')
+    
+    if title:
+        draw = ImageDraw.Draw(canvas)
+        try: font = ImageFont.truetype("arial.ttf", 50)
+        except: font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), title, font=font)
+        txt_w = bbox[2] - bbox[0]
+        txt_h = bbox[3] - bbox[1]
+        draw.text(((W-txt_w)/2, (t_h-txt_h)/2), title, font=font, fill="black")
+
+    num = len(images)
+    if num == 1: c, r = 1, 1
+    elif num <= 4: c, r = 2, 2
+    elif num <= 9: c, r = 3, 3
+    elif num <= 16: c, r = 4, 4
+    else:
+        c = math.ceil(math.sqrt(num))
+        r = math.ceil(num / c)
+        
+    cw = W // c
+    ch = avail_h // r
+    
+    idx = 0
+    for i in range(r):
+        for j in range(c):
+            if idx >= num: break
+            try:
+                img = Image.open(BytesIO(images[idx]))
+                img = ImageOps.exif_transpose(img)
+                img = img.resize((cw, ch), Image.Resampling.LANCZOS)
+                d = ImageDraw.Draw(img)
+                d.rectangle([0, 0, cw, ch], outline="black", width=2)
+                canvas.paste(img, (j*cw, t_h + i*ch))
+            except: pass
+            idx += 1
+            
+    return canvas
+
+# --- FINAL GENERATORS ---
 
 def create_word_doc(images, title):
     doc = Document()
     section = doc.sections[0]
     page_w, page_h = 8.0, 11.0
     num = len(images)
-    
     if num == 0: return None
 
-    # Title
     if title:
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run(title)
-        r.font.size = Pt(24)
+        r.font.size = Pt(36)
         r.bold = True
         p.space_after = Pt(6)
         h_offset = 0.6
@@ -104,7 +153,6 @@ def create_word_doc(images, title):
         
     avail_h = page_h - h_offset
 
-    # Grid
     if num == 1: c, r = 1, 1
     elif num <= 4: c, r = 2, 2
     elif num <= 9: c, r = 3, 3
@@ -124,24 +172,22 @@ def create_word_doc(images, title):
     for i in range(r):
         for j in range(c):
             if idx >= num: break
-            
             cell = table.rows[i].cells[j]
             set_cell_margins(cell, top=0, start=0, bottom=0, end=0)
             set_cell_vertical_align(cell, "center")
             set_cell_border(cell)
-            
             p = cell.paragraphs[0]
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                tmp.write(images[idx])
-                tmp_name = tmp.name
-            
             try:
+                pil_img = Image.open(BytesIO(images[idx]))
+                pil_img = ImageOps.exif_transpose(pil_img)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                    pil_img.save(tmp)
+                    tmp_name = tmp.name
                 p.add_run().add_picture(tmp_name, width=Inches(cell_w), height=Inches(cell_h))
+                os.remove(tmp_name)
             except: pass
-            
-            os.remove(tmp_name)
             idx += 1
 
     f = BytesIO()
@@ -152,22 +198,18 @@ def create_word_doc(images, title):
 def create_png(images, title):
     num = len(images)
     if num == 0: return None
-
     W, H = 2480, 3508
-    t_h = 250 if title else 0
+    t_h = 400 if title else 0
     avail_h = H - t_h
-    
     canvas = Image.new('RGB', (W, H), 'white')
     
     if title:
         draw = ImageDraw.Draw(canvas)
-        try: font = ImageFont.truetype("arial.ttf", 80)
+        try: font = ImageFont.truetype("arial.ttf", 160)
         except: font = ImageFont.load_default()
-        
         bbox = draw.textbbox((0, 0), title, font=font)
         txt_w = bbox[2] - bbox[0]
         txt_h = bbox[3] - bbox[1]
-        
         draw.text(((W-txt_w)/2, (t_h-txt_h)/2), title, font=font, fill="black")
 
     if num == 1: c, r = 1, 1
@@ -187,6 +229,7 @@ def create_png(images, title):
             if idx >= num: break
             try:
                 img = Image.open(BytesIO(images[idx]))
+                img = ImageOps.exif_transpose(img)
                 img = img.resize((cw, ch), Image.Resampling.LANCZOS)
                 d = ImageDraw.Draw(img)
                 d.rectangle([0, 0, cw, ch], outline="black", width=5)
@@ -199,76 +242,59 @@ def create_png(images, title):
     f.seek(0)
     return f
 
-# --- UI ---
+# --- MAIN APP ---
 
-# 1. Header
-st.markdown("<h1>Mobile Collage Maker</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center; color:#666;'>Tap photos or use camera</p>", unsafe_allow_html=True)
+st.markdown('<h1 class="title">✨ Easy Photo Collage</h1>', unsafe_allow_html=True)
 
-# 2. Input
-title_input = st.text_input("📝 Title", placeholder="e.g. My Trip", label_visibility="collapsed")
+# Input Section
+with st.container():
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        title_input = st.text_input("📝 Enter Title", value="My Collage", label_visibility="collapsed")
+    with col2:
+        # Just for layout balance or could add advanced options here
+        pass
 
-# 3. Upload Options
-# We use a column layout to put File Upload and Camera side-by-side on desktop, 
-# but they will stack automatically on mobile.
+st.markdown("### 1. Choose Photos")
 up_col, cam_col = st.columns(2)
-
 with up_col:
-    uploaded_files = st.file_uploader(
-        "📂 Gallery", 
-        type=['png', 'jpg', 'jpeg'], 
-        accept_multiple_files=True,
-        label_visibility="collapsed"
-    )
-
+    uploaded_files = st.file_uploader("📂 Gallery", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, label_visibility="collapsed")
 with cam_col:
-    # This specific button opens the phone camera directly
     camera_files = st.camera_input("📸 Camera", label_visibility="collapsed")
 
-# Combine images from both sources
 all_images_raw = []
 if uploaded_files:
     all_images_raw.extend([f.read() for f in uploaded_files])
 if camera_files:
-    # camera_input returns a single file, handle it if multiple photos aren't taken
-    # Note: Standard st.camera_input takes one photo at a time.
     all_images_raw.append(camera_files.read())
 
+# Preview Section
+st.markdown("### 2. Preview")
 if all_images_raw:
-    st.success(f"✅ {len(all_images_raw)} photo(s) selected")
+    st.success(f"{len(all_images_raw)} photos loaded.")
+    preview_img = create_preview(all_images_raw, title_input)
+    if preview_img:
+        st.image(preview_img, use_column_width=True)
+        
+    # Download Section
+    st.markdown("### 3. Download")
+    col_down1, col_down2 = st.columns(2)
     
-    # Use full width for buttons on mobile for easier tapping
-    st.markdown("---")
-    
-    # Generate Buttons
-    st.markdown("### Choose Format")
-    
-    res_doc = create_word_doc(all_images_raw, title_input)
-    res_png = create_png(all_images_raw, title_input)
-    
-    # Button Column 1: Word
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if res_doc:
-            st.download_button(
-                "📄 Word Doc", 
-                res_doc, 
-                f"{title_input or 'Collage'}.docx", 
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="download_word"
-            )
-            
-    with col_btn2:
-        if res_png:
-            st.download_button(
-                "🖼️ PNG Image", 
-                res_png, 
-                f"{title_input or 'Collage'}.png", 
-                mime="image/png",
-                key="download_png"
-            )
+    with col_down1:
+        if st.button("📄 Download Word", use_container_width=True):
+            with st.spinner("Generating..."):
+                res = create_word_doc(all_images_raw, title_input)
+                if res:
+                    st.download_button("⬇️ Save Word", res, f"{title_input}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
+    with col_down2:
+        if st.button("🖼️ Download PNG", use_container_width=True):
+            with st.spinner("Rendering..."):
+                res = create_png(all_images_raw, title_input)
+                if res:
+                    st.download_button("⬇️ Save PNG", res, f"{title_input}.png", mime="image/png")
 else:
-    st.info("👇 Upload from gallery or take a photo below")
+    st.info("👇 Upload photos or take a picture to start creating!")
 
-st.markdown("<center><small>Mobile Optimized</small></center>", unsafe_allow_html=True)
+st.markdown("---")
+st.markdown("<center><small>Made with ❤️ | Mobile Friendly</small></center>", unsafe_allow_html=True)
